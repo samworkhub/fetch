@@ -2,28 +2,28 @@ name: Fetch NASA News Articles
 
 on:
   schedule:
-    # Runs every hour at the 0th minute
+    # Runs every hour at the 0th minute (e.g., 1:00, 2:00, etc.)
     - cron: '0 * * * *'
-  workflow_dispatch: # Allows manual triggering
+  workflow_dispatch: # Allows manual triggering from the Actions tab
 
 jobs:
   fetch_articles:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Required to push changes to the repo
+      contents: write # Required to push changes back to the repository
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          # If processed_articles.txt is used, persist it across runs
-          # This is implicitly handled if you commit it back.
-          # For very large numbers of files, consider git-lfs if images are huge.
-          fetch-depth: 0 # Fetches all history so you can check for existing files
+          # fetch-depth: 0 fetches all history, which is good for
+          # checking existing files and ensuring processed_articles.txt is up-to-date.
+          fetch-depth: 0 
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x' # Use a recent Python 3 version
+          python-version: '3.10' # Or '3.x' for latest, '3.10', '3.11', etc.
 
       - name: Install Dependencies
         run: |
@@ -31,18 +31,25 @@ jobs:
           pip install requests beautifulsoup4 markdownify
 
       - name: Run Fetch NASA Articles Script
-        run: python fetch_nasa_articles.py # Assuming your script is in the root
+        # Ensure your Python script is named 'fetch_nasa_articles.py'
+        # and is in the root of your repository.
+        run: python fetch_nasa_articles.py 
 
       - name: Commit and Push Changes
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          # Stage all new/modified files (Markdown, images, processed_articles.txt)
+          
+          # Stage the articles directory (for .md files) and the processed_articles.txt file
           git add articles/ processed_articles.txt
+          
           # Check if there are changes to commit
+          # git diff --staged --quiet exits with 0 if no changes, 1 if there are changes
           if git diff --staged --quiet; then
-            echo "No changes to commit."
+            echo "No new articles or changes to commit."
           else
+            echo "Changes detected. Committing and pushing..."
             git commit -m "Automated: Update NASA news articles"
             git push
+            echo "Push successful."
           fi
