@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import requests
 from bs4 import BeautifulSoup
 import markdownify # A library to convert HTML to Markdown
@@ -12,7 +13,6 @@ NASA_NEWS_URL = "https://www.nasa.gov/news/recently-published/"
 PROCESSED_ARTICLES_FILE = "processed_articles.txt"
 # Directory in your GitHub repo to store markdown files
 MARKDOWN_DIR = "articles"
-# IMAGES_DIR is no longer needed as we are not downloading images
 
 REQUEST_TIMEOUT = 15 # seconds
 REQUEST_DELAY = 1    # second, delay between fetching full articles
@@ -69,7 +69,6 @@ def convert_html_to_markdown(html_content_str, base_article_url):
             # Ensure image URL is absolute
             abs_img_url = urljoin(base_article_url, original_src)
             img_tag['src'] = abs_img_url # Use the absolute original URL
-            # print(f"  Image URL set to: {abs_img_url}") # Uncomment for debugging
         else:
             print("  Image tag found with no src or data-src attribute.")
 
@@ -110,7 +109,6 @@ def fetch_and_process_articles():
         article_url_absolute = urljoin(NASA_NEWS_URL, article_url_relative)
 
         if article_url_absolute in processed_urls:
-            # print(f"Skipping already processed: {article_url_absolute}")
             continue
 
         print(f"\nFetching new article: {article_url_absolute}")
@@ -127,13 +125,13 @@ def fetch_and_process_articles():
 
         # Title
         title_tag = article_soup.find('h1')
-        article_title = title_tag.get_text(strip=True) if title_tag else "Untitled Article"
+        article_title_raw = title_tag.get_text(strip=True) if title_tag else "Untitled Article"
 
         # Description (Meta description)
         meta_desc_tag = article_soup.find('meta', attrs={'name': 'description'})
-        description = meta_desc_tag['content'].strip() if meta_desc_tag and meta_desc_tag.get('content') else ""
+        description_raw = meta_desc_tag['content'].strip() if meta_desc_tag and meta_desc_tag.get('content') else ""
         
-        article_slug = sanitize_filename(article_title)
+        article_slug = sanitize_filename(article_title_raw)
 
         # Content: Prioritize specific content divs.
         content_element = article_soup.find('div', class_='wysiwyg')
@@ -141,9 +139,8 @@ def fetch_and_process_articles():
             print(f"  Specific 'div.wysiwyg' not found for {article_url_absolute}. Trying to find <article> tag.")
             content_element = article_soup.find('article')
             if content_element:
-                # If using <article>, remove H1 if it's a duplicate of the main page title
                 h1_in_content = content_element.find('h1')
-                if h1_in_content and h1_in_content.get_text(strip=True) == article_title:
+                if h1_in_content and h1_in_content.get_text(strip=True) == article_title_raw:
                     h1_in_content.decompose()
 
         if not content_element:
@@ -152,10 +149,10 @@ def fetch_and_process_articles():
 
         article_html_content_str = str(content_element)
 
-        print(f"  Converting '{article_title}' to Markdown...")
+        print(f"  Converting '{article_title_raw}' to Markdown...")
         markdown_body = convert_html_to_markdown(
             article_html_content_str,
-            article_url_absolute # Pass base_url for resolving relative image paths
+            article_url_absolute
         )
 
         # Prepare Markdown file content
@@ -166,15 +163,26 @@ def fetch_and_process_articles():
 
         # Construct full Markdown content with metadata (YAML frontmatter)
         full_md_content = f"---\n"
-        full_md_content += f"title: \"{article_title.replace('"', '“')}\"\n"
-        if description:
-            full_md_content += f"description: \"{description.replace('"', '“')}\"\n"
+        
+        # Replace standard double quotes with a left smart quote (U+201C) for display in YAML values
+        # This makes the title/description look a bit nicer if they contained quotes.
+        # IMPORTANT: The f-string itself uses standard ASCII quotes.
+        processed_title_for_yaml = article_title_raw.replace('"', '\u201C') 
+        full_md_content += f"title: \"{processed_title_for_yaml}\"\n"
+        
+        if description_raw:
+            processed_description_for_yaml = description_raw.replace('"', '\u201C')
+            full_md_content += f"description: \"{processed_description_for_yaml}\"\n"
+        
         full_md_content += f"source_url: {article_url_absolute}\n"
         full_md_content += f"---\n\n"
-        full_md_content += f"# {article_title}\n\n"
-        if description:
-            full_md_content += f"*Summary: {description}*\n\n"
-        full_md_content += f"**Source:** [{article_title}]({article_url_absolute})\n\n"
+        
+        # Use the raw title for the H1 in the markdown body
+        full_md_content += f"# {article_title_raw}\n\n"
+        if description_raw: # Optional: include description in body as well
+            full_md_content += f"*Summary: {description_raw}*\n\n"
+        
+        full_md_content += f"**Source:** [{article_title_raw}]({article_url_absolute})\n\n"
         full_md_content += "---\n\n"
         full_md_content += markdown_body
 
@@ -194,9 +202,7 @@ def fetch_and_process_articles():
         print("\nNo new articles found to process.")
 
 if __name__ == "__main__":
-    # Ensure markdown base directory exists
     if not os.path.exists(MARKDOWN_DIR):
         os.makedirs(MARKDOWN_DIR)
-    # No need to create IMAGES_DIR as images are not downloaded
         
     fetch_and_process_articles()
