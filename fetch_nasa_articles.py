@@ -4,6 +4,7 @@ import markdownify # A library to convert HTML to Markdown
 import os
 import re
 from urllib.parse import urljoin, urlparse
+import time # For adding delays
 
 # --- Configuration ---
 NASA_NEWS_URL = "https://www.nasa.gov/news/recently-published/"
@@ -11,8 +12,15 @@ NASA_NEWS_URL = "https://www.nasa.gov/news/recently-published/"
 PROCESSED_ARTICLES_FILE = "processed_articles.txt"
 # Directory in your GitHub repo to store markdown files
 MARKDOWN_DIR = "articles"
-# Optional: Directory in your GitHub repo to store images (if downloading)
-IMAGES_DIR = os.path.join(MARKDOWN_DIR, "images")
+# IMAGES_DIR is no longer needed as we are not downloading images
+
+REQUEST_TIMEOUT = 15 # seconds
+REQUEST_DELAY = 1    # second, delay between fetching full articles
+
+# Standard User-Agent
+REQUEST_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+}
 
 # --- Helper Functions ---
 
@@ -20,165 +28,135 @@ def get_processed_articles():
     """Reads the list of processed article URLs."""
     if not os.path.exists(PROCESSED_ARTICLES_FILE):
         return set()
-    with open(PROCESSED_ARTICLES_FILE, "r") as f:
-        return set(line.strip() for line in f)
+    try:
+        with open(PROCESSED_ARTICLES_FILE, "r", encoding="utf-8") as f:
+            return set(line.strip() for line in f)
+    except IOError as e:
+        print(f"Error reading processed articles file: {e}")
+        return set()
 
 def add_to_processed_articles(article_url):
     """Adds an article URL to the processed list."""
-    with open(PROCESSED_ARTICLES_FILE, "a") as f:
-        f.write(article_url + "\n")
+    try:
+        with open(PROCESSED_ARTICLES_FILE, "a", encoding="utf-8") as f:
+            f.write(article_url + "\n")
+    except IOError as e:
+        print(f"Error writing to processed articles file: {e}")
 
 def sanitize_filename(title):
     """Sanitizes a title to be a valid filename."""
+    if not title:
+        title = "untitled-article"
+    title = str(title)
     title = re.sub(r'[^\w\s-]', '', title.lower())
-    title = re.sub(r'[-\s]+', '-', title).strip('-')
-    return title
+    title = re.sub(r'[-\s]+', '-', title).strip('-_')
+    return title if title else "untitled"
 
-def download_image(img_url, article_slug):
+def convert_html_to_markdown(html_content_str, base_article_url):
     """
-    Downloads an image and saves it locally.
-    Returns the new local path for the markdown.
+    Converts HTML to Markdown, ensuring image URLs are absolute and point to original sources.
+    base_article_url is for resolving relative image paths if any.
     """
-    if not img_url.startswith(('http:', 'https:')):
-        print(f"Skipping non-absolute image URL: {img_url}")
-        return None # Or try to resolve it if it's relative to nasa.gov
+    soup = BeautifulSoup(html_content_str, 'html.parser')
 
-    try:
-        response = requests.get(img_url, stream=True)
-        response.raise_for_status()
-
-        img_name = os.path.basename(urlparse(img_url).path)
-        # Ensure image name is somewhat unique if multiple articles use same image name
-        local_img_folder = os.path.join(IMAGES_DIR, article_slug)
-        if not os.path.exists(local_img_folder):
-            os.makedirs(local_img_folder)
-
-        local_img_path = os.path.join(local_img_folder, img_name)
-
-        with open(local_img_path, 'wb') as f:
-            for chunk in response.iter_content(8192):
-                f.write(chunk)
-
-        # Return a relative path for the markdown file
-        # e.g., images/article-slug/image.jpg
-        return os.path.join("images", article_slug, img_name)
-    except requests.exceptions.RequestException as e:
-        print(f"Error downloading {img_url}: {e}")
-        return None # Return original URL as fallback or skip
-    except Exception as e:
-        print(f"Error processing image {img_url}: {e}")
-        return None
-
-def convert_html_to_markdown(html_content, base_url, article_slug, download_images_flag=True):
-    """
-    Converts HTML to Markdown, handling images.
-    Base_url is for resolving relative image paths if any.
-    Article_slug is used for creating a dedicated image folder.
-    """
-    soup = BeautifulSoup(html_content, 'html.parser')
-
-    if download_images_flag:
-        for img_tag in soup.find_all('img'):
-            original_src = img_tag.get('src')
-            if original_src:
-                # Ensure image URL is absolute
-                abs_img_url = urljoin(base_url, original_src)
-                print(f"Processing image: {abs_img_url}")
-                local_image_path = download_image(abs_img_url, article_slug)
-                if local_image_path:
-                    img_tag['src'] = local_image_path
-                else:
-                    # Fallback: use original URL if download fails
-                    img_tag['src'] = abs_img_url
-                    print(f"Failed to download or link image locally: {abs_img_url}. Using original URL.")
-            else:
-                print("Image tag found with no src attribute.")
+    for img_tag in soup.find_all('img'):
+        original_src = img_tag.get('src')
+        # Handle data-src or other lazy loading attributes if necessary
+        if not original_src and img_tag.get('data-src'):
+            original_src = img_tag.get('data-src')
+        
+        if original_src:
+            # Ensure image URL is absolute
+            abs_img_url = urljoin(base_article_url, original_src)
+            img_tag['src'] = abs_img_url # Use the absolute original URL
+            # print(f"  Image URL set to: {abs_img_url}") # Uncomment for debugging
+        else:
+            print("  Image tag found with no src or data-src attribute.")
 
     # Convert the (potentially modified) HTML to Markdown
-    # You might need to experiment with options for markdownify for best results
-    # e.g., markdownify.markdownify(str(soup), heading_style=markdownify. एटएक्स)
-    md = markdownify.markdownify(str(soup), heading_style='atx', bullets='-')
+    md = markdownify.markdownify(str(soup), heading_style='atx', bullets='-', strip=['script', 'style'])
     return md
 
 # --- Main Logic ---
 
 def fetch_and_process_articles():
-    print("Fetching NASA news page...")
+    print(f"Fetching NASA news list from: {NASA_NEWS_URL}")
     try:
-        response = requests.get(NASA_NEWS_URL)
+        response = requests.get(NASA_NEWS_URL, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching main news page: {e}")
+        print(f"Error fetching main news page {NASA_NEWS_URL}: {e}")
         return
 
     soup = BeautifulSoup(response.content, 'html.parser')
     processed_urls = get_processed_articles()
-    new_articles_found = False
+    new_articles_found = 0
 
-    # **IMPORTANT**: The selectors below are EXAMPLES and WILL LIKELY NEED ADJUSTMENT
-    # You need to inspect `https://www.nasa.gov/news/recently-published/`
-    # and find the correct HTML elements that contain the article links and titles.
-    # Common patterns involve looking for <div>s with specific classes, then <a> tags within them.
-
-    # Example (you MUST adapt this based on current NASA HTML structure):
-    # article_elements = soup.select('div.list-item article > div.content > h3 > a')
-    # Or for a more modern NASA layout, it might be something like:
-    article_elements = soup.select('article .hds-content-item-heading a') # Hypothetical selector
+    # Selector for article links on the main news page.
+    article_elements = soup.select('div.hds-content-item h3.hds-content-item-heading a')
 
     if not article_elements:
-        print("No article elements found. Check your BeautifulSoup selectors for the main news page.")
+        print("No article links found on the main news page. Check CSS selector 'div.hds-content-item h3.hds-content-item-heading a'.")
+        print("Page structure might have changed.")
         return
 
     print(f"Found {len(article_elements)} potential articles on the main page.")
 
-    for item in reversed(article_elements): # Process older first, or remove reversed()
-        article_url_relative = item.get('href')
+    for item_link in reversed(article_elements): # Process older first (chronological order in repo)
+        article_url_relative = item_link.get('href')
         if not article_url_relative:
             continue
 
         article_url_absolute = urljoin(NASA_NEWS_URL, article_url_relative)
 
         if article_url_absolute in processed_urls:
-            print(f"Skipping already processed: {article_url_absolute}")
+            # print(f"Skipping already processed: {article_url_absolute}")
             continue
 
         print(f"\nFetching new article: {article_url_absolute}")
         try:
-            article_response = requests.get(article_url_absolute)
+            time.sleep(REQUEST_DELAY) # Be polite to the server
+            article_response = requests.get(article_url_absolute, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
             article_response.raise_for_status()
+            article_response.encoding = article_response.apparent_encoding 
         except requests.exceptions.RequestException as e:
             print(f"Error fetching article {article_url_absolute}: {e}")
             continue
 
         article_soup = BeautifulSoup(article_response.content, 'html.parser')
 
-        # **IMPORTANT**: Adjust these selectors for the individual article page
         # Title
-        title_tag = article_soup.find('h1') # Often a good guess for the main title
+        title_tag = article_soup.find('h1')
         article_title = title_tag.get_text(strip=True) if title_tag else "Untitled Article"
 
-        # Description (Meta description or first paragraph)
+        # Description (Meta description)
         meta_desc_tag = article_soup.find('meta', attrs={'name': 'description'})
-        description = meta_desc_tag['content'] if meta_desc_tag else ""
-
-        # Content (This is often the hardest part to get right)
-        # Look for a main content div, e.g., <article>, <div class="article-body">
-        # The selector here is CRITICAL and specific to NASA's article layout.
-        # content_element = article_soup.find('div', class_='article-content-body') # Example
-        # A more generic approach, if there's a main article tag:
-        content_element = article_soup.find('article')
-        if not content_element:
-            # Fallback to a common content div class if 'article' isn't the main container
-            content_element = article_soup.find('div', id='wysiwyg-content') # Another example for NASA pages
-            if not content_element:
-                print(f"Could not find main content element for {article_url_absolute}. Skipping.")
-                continue
-
-        article_html_content = str(content_element)
+        description = meta_desc_tag['content'].strip() if meta_desc_tag and meta_desc_tag.get('content') else ""
+        
         article_slug = sanitize_filename(article_title)
 
-        print(f"Converting '{article_title}' to Markdown...")
-        markdown_content = convert_html_to_markdown(article_html_content, article_url_absolute, article_slug, download_images_flag=True)
+        # Content: Prioritize specific content divs.
+        content_element = article_soup.find('div', class_='wysiwyg')
+        if not content_element:
+            print(f"  Specific 'div.wysiwyg' not found for {article_url_absolute}. Trying to find <article> tag.")
+            content_element = article_soup.find('article')
+            if content_element:
+                # If using <article>, remove H1 if it's a duplicate of the main page title
+                h1_in_content = content_element.find('h1')
+                if h1_in_content and h1_in_content.get_text(strip=True) == article_title:
+                    h1_in_content.decompose()
+
+        if not content_element:
+            print(f"  Could not find main content element for {article_url_absolute}. Skipping.")
+            continue
+
+        article_html_content_str = str(content_element)
+
+        print(f"  Converting '{article_title}' to Markdown...")
+        markdown_body = convert_html_to_markdown(
+            article_html_content_str,
+            article_url_absolute # Pass base_url for resolving relative image paths
+        )
 
         # Prepare Markdown file content
         md_file_name = f"{article_slug}.md"
@@ -186,23 +164,39 @@ def fetch_and_process_articles():
             os.makedirs(MARKDOWN_DIR)
         md_file_path = os.path.join(MARKDOWN_DIR, md_file_name)
 
-        full_md_content = f"# {article_title}\n\n"
+        # Construct full Markdown content with metadata (YAML frontmatter)
+        full_md_content = f"---\n"
+        full_md_content += f"title: \"{article_title.replace('"', '“')}\"\n"
         if description:
-            full_md_content += f"**Description:** {description}\n\n"
-        full_md_content += f"Source: [{article_url_absolute}]({article_url_absolute})\n\n---\n\n"
-        full_md_content += markdown_content
+            full_md_content += f"description: \"{description.replace('"', '“')}\"\n"
+        full_md_content += f"source_url: {article_url_absolute}\n"
+        full_md_content += f"---\n\n"
+        full_md_content += f"# {article_title}\n\n"
+        if description:
+            full_md_content += f"*Summary: {description}*\n\n"
+        full_md_content += f"**Source:** [{article_title}]({article_url_absolute})\n\n"
+        full_md_content += "---\n\n"
+        full_md_content += markdown_body
 
-        with open(md_file_path, "w", encoding="utf-8") as f:
-            f.write(full_md_content)
-        print(f"Saved: {md_file_path}")
+        try:
+            with open(md_file_path, "w", encoding="utf-8") as f:
+                f.write(full_md_content)
+            print(f"  Saved: {md_file_path}")
+            add_to_processed_articles(article_url_absolute)
+            new_articles_found += 1
+        except IOError as e:
+            print(f"  Error writing markdown file {md_file_path}: {e}")
 
-        add_to_processed_articles(article_url_absolute)
-        new_articles_found = True
 
-    if not new_articles_found:
-        print("No new articles found to process.")
+    if new_articles_found > 0:
+        print(f"\nSuccessfully processed {new_articles_found} new articles.")
+    else:
+        print("\nNo new articles found to process.")
 
 if __name__ == "__main__":
-    if not os.path.exists(IMAGES_DIR): # Ensure images base directory exists if we plan to download
-        os.makedirs(IMAGES_DIR)
+    # Ensure markdown base directory exists
+    if not os.path.exists(MARKDOWN_DIR):
+        os.makedirs(MARKDOWN_DIR)
+    # No need to create IMAGES_DIR as images are not downloaded
+        
     fetch_and_process_articles()
